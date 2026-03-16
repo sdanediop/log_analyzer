@@ -192,9 +192,3 @@ Le header affiche simultanément le **niveau de risque sécurité** et le **stat
 
 --- Conformité : 53.1% (77/145) -- Gaps critiques : 33  Gaps modérés : 35 ---
 ```
-
----
-
-## Licence
-
-Usage professionnel interne. Ne pas distribuer sans autorisation.
