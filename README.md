@@ -104,7 +104,7 @@ python3 log_audit.py traces.json logs.csv service.log --output rapport.html
 | D-01b | Adresses email | ÉLEVÉ |
 | D-02 | Noms complets en clair (heuristique) | ÉLEVÉ |
 | D-03 | Champs PII dans les structures JSON (`userId`, `email`, `sessionId`…) | ÉLEVÉ |
-| D-04 | Données financières Mobile Money (`solde`, `FCFA`, `Orange Money`, `balance`…) | ÉLEVÉ |
+| D-04 | Données financières Mobile Money (`solde`, `FCFA`…) | ÉLEVÉ |
 | D-05 | Numéros de carte bancaire — PAN (vérification Luhn + filtre contextuel) | CRITIQUE |
 | D-07 | Codes OTP / PIN en clair (`otp=`, `pin=`, `totp=` + valeur numérique) | CRITIQUE |
 | D-08 | Données d'identité par label (`cni=`, `passport=`, `dob=`, `date_naissance=`…) | CRITIQUE |
