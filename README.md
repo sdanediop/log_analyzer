@@ -23,7 +23,7 @@ Outil d'audit de sécurité pour fichiers logs — génère un rapport HTML uniq
 ## Installation
 
 ```bash
-git clone https://github.com/<votre-repo>/log_audit.git
+git clone https://github.com/sdanediop/log_analyzer.git
 cd log_audit
 ```
 
