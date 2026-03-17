@@ -1,4 +1,4 @@
-# log_audit.py
+# log_analyzer.py
 
 Outil d'audit de sécurité pour fichiers logs — génère un rapport HTML unique couvrant la sécurité des logs, la détection de données personnelles et la conformité aux exigences de journalisation.
 
@@ -24,7 +24,7 @@ Outil d'audit de sécurité pour fichiers logs — génère un rapport HTML uniq
 
 ```bash
 git clone https://github.com/sdanediop/log_analyzer.git
-cd log_audit
+cd log_analyzer
 ```
 
 Aucune installation supplémentaire nécessaire.
@@ -35,19 +35,19 @@ Aucune installation supplémentaire nécessaire.
 
 ```bash
 # Analyser un fichier unique
-python3 log_audit.py fichier.log
+python3 log_analyzer.py fichier.log
 
 # Analyser plusieurs fichiers
-python3 log_audit.py audit.log cli.log webui.log
+python3 log_analyzer.py file.log
 
 # Analyser tous les logs d'un répertoire
-python3 log_audit.py --dir /var/log/appli/
+python3 log_analyzer.py --dir /var/log/appli/
 
 # Nommer le rapport de sortie
-python3 log_audit.py --dir /var/log/appli/ --output rapport_audit.html
+python3 log_analyzer.py --dir /var/log/appli/ --output rapport_audit.html
 
 # Formats supportés
-python3 log_audit.py traces.json logs.csv service.log --output rapport.html
+python3 log_analyzer.py traces.json logs.csv service.log --output rapport.html
 ```
 
 ### Arguments
