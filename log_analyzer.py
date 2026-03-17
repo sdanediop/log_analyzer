@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-log_audit.py  v1.0
+log_audit.py  v3.0
 Audit de sécurité — fichiers logs (texte, JSON, CSV)
+
+Les patterns de détection et les exigences de conformité sont définis
+dans des fichiers YAML séparés, dans le même répertoire que ce script :
+    patterns.yaml   — patterns regex sécurité, PII, auth, privilèges
+    compliance.yaml — exigences de conformité C-01 à C-29
 
 Usage:
     python3 log_audit.py fichier.log
     python3 log_audit.py *.log *.json *.csv --output rapport.html
     python3 log_audit.py --dir /chemin/logs --output rapport.html
 
-Formats supportes:
-    - Texte brut / semi-structure (Spring Boot, syslog, custom)
+Formats supportés:
+    - Texte brut / semi-structuré (Spring Boot, syslog, custom)
     - JSON (tableau ou objet avec clé data[])
     - CSV (délimiteur auto-détecté)
 
-Checks:
-    [S] Sécurité    — secrets, tokens, clés, IPs, stack tracés, SQL, JDBC, hex keys
-    [F] Forensique  — horodatage, couverture, intégrité SHA-256
-    [A] Auth        — sessions, login/logout, échecs, activité post-logout
-    [P] Privilèges  — commandes sensibles, actions ecriture, accès hors-horaires
-    [D] Données     — PII (MSISDN, emails, noms), données métier sensibles
+Dépendance : pyyaml  (pip install pyyaml)
 """
 
 import re
@@ -32,458 +32,159 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict, Counter
 
+try:
+    import yaml
+except ImportError:
+    print("Erreur : pyyaml requis — pip install pyyaml")
+    sys.exit(1)
+
 
 # ─────────────────────────────────────────────────────────────────
-# PATTERNS
+# CHARGEMENT DES PATTERNS YAML
 # ─────────────────────────────────────────────────────────────────
 
+_SCRIPT_DIR = Path(__file__).parent
+
+def _load_yaml(filename: str) -> dict:
+    path = _SCRIPT_DIR / filename
+    if not path.exists():
+        print(f"Erreur : fichier de configuration introuvable : {path}")
+        sys.exit(1)
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+def _compile(pattern: str, flags_str: str = "IGNORECASE") -> re.Pattern:
+    """Compile une regex depuis une chaîne avec flags optionnels."""
+    flags = 0
+    if flags_str:
+        for flag in flags_str.split("|"):
+            flag = flag.strip()
+            if flag == "IGNORECASE":
+                flags |= re.IGNORECASE
+            elif flag == "MULTILINE":
+                flags |= re.MULTILINE
+    return re.compile(pattern, flags)
+
+def _load_patterns():
+    """Charge patterns.yaml et retourne les structures utilisées par run_checks."""
+    data = _load_yaml("patterns.yaml")
+
+    # Patterns de sécurité S-01 : liste de (id, group, regex)
+    # Exclusions : patterns qui ont leur propre check dédié dans run_checks
+    S01_EXCLUSIONS = {"S-02-internal_ip", "S-03-stack_trace", "S-04-sql_query", "S-05-debug_level"}
+    sensitive_patterns = []
+    for p in data.get("security_patterns", []):
+        if not p.get("enabled", True):
+            continue
+        if p["id"] in S01_EXCLUSIONS:
+            continue
+        sensitive_patterns.append((
+            p["id"],
+            p.get("group", ""),
+            _compile(p["pattern"], p.get("flags", "IGNORECASE"))
+        ))
+
+    # Patterns par identifiant pour accès direct
+    by_id = {}
+    for section in ["security_patterns", "auth_patterns", "privilege_patterns",
+                    "pii_patterns", "forensic_patterns"]:
+        for p in data.get(section, []):
+            if not p.get("enabled", True):
+                continue
+            by_id[p["id"]] = _compile(p["pattern"], p.get("flags", "IGNORECASE"))
+
+    pii_json_keys       = set(k.lower() for k in data.get("pii_json_keys", []))
+    sensitive_json_keys = set(k.lower() for k in data.get("sensitive_json_keys", []))
+
+    def _build_exclusion_re(terms):
+        if not terms:
+            return None
+        return re.compile("|".join(re.escape(t) for t in terms), re.IGNORECASE)
+
+    pan_exclusion_re      = _build_exclusion_re(data.get("pan_exclusion_terms", []))
+    fullname_exclusion_re = _build_exclusion_re(data.get("fullname_exclusion_terms", []))
+    telecom_exclusion_re  = _build_exclusion_re(data.get("telecom_exclusion_terms", []))
+
+    return (sensitive_patterns, by_id, pii_json_keys, sensitive_json_keys,
+            pan_exclusion_re, fullname_exclusion_re, telecom_exclusion_re)
+
+def _load_compliance():
+    """Charge compliance.yaml et retourne COMPLIANCE_CHECKS."""
+    data = _load_yaml("compliance.yaml")
+    checks = []
+    for c in data.get("compliance_checks", []):
+        if not c.get("enabled", True):
+            continue
+        pattern = _compile(c["pattern"]) if c.get("pattern") else None
+        checks.append((
+            c["id"],
+            c["title"],
+            c["level_if_absent"],
+            pattern,
+            c.get("gap_description", "").strip()
+        ))
+    return checks
+
+# Chargement au démarrage du module
+(SENSITIVE_PATTERNS,
+ _PAT,
+ PII_JSON_KEYS,
+ SENSITIVE_JSON_KEYS,
+ PAN_EXCLUSION_RE,
+ FULLNAME_EXCLUSION_RE,
+ TELECOM_EXCLUSION_RE) = _load_patterns()
+
+COMPLIANCE_CHECKS = _load_compliance()
+
+# Constantes internes (non exposées dans les YAML — logique pure)
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mGKHF]|\x1b\([AB]|\x1b=[0-9]*')
 
-SENSITIVE_PATTERNS = [
-    ("password",    re.compile(r'(?i)\bpasswd?\s*[=:]\s*\S{3,}')),
-    ("secret",      re.compile(r'(?i)\bsecret\s*[=:]\s*\S{3,}')),
-    ("api_key",     re.compile(r'(?i)\bapi[_\-]?key\s*[=:]\s*\S{6,}')),
-    ("token_kv",    re.compile(r'(?i)\btoken\s*[=:]\s*[A-Za-z0-9._\-]{20,}')),
-    ("bearer",      re.compile(r'Bearer\s+[A-Za-z0-9._\-]{20,}')),
-    ("credential",  re.compile(r'(?i)\bcredential[s]?\s*[=:]\s*\S{3,}')),
-    ("private_key", re.compile(r'(?i)(private[_\-]?key|-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+)?PRIVATE)')),
-    ("ssh_key",     re.compile(r'-----BEGIN\s+(RSA|DSA|EC|OPENSSH)\s+PRIVATE\s+KEY-----')),
-    ("pgp_key",     re.compile(r'-----BEGIN\s+PGP\s+(PRIVATE|SECRET)\s+KEY\s+BLOCK-----')),
-    ("x509_cert",   re.compile(r'-----BEGIN\s+CERTIFICATE-----')),
-    ("jwt",         re.compile(r'eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}')),
-    ("hash_passwd", re.compile(r'(?i)\$(2[aby]|5|6)\$[./A-Za-z0-9]{10,}')),
-    ("hash_md5_ctx",re.compile(r'(?i)(password|passwd|hash|md5)[=:\s"\']([0-9a-f]{32})\b')),
-    ("jdbc_url",    re.compile(r'jdbc:[a-z]+://[\w.\-]+:\d+/\w+', re.IGNORECASE)),
-    ("jdbc_creds",  re.compile(r'jdbc:[a-z]+://[^\s"\']+\s+as\s+"[^"]+"', re.IGNORECASE)),
-    ("hex_key",     re.compile(r'\b[0-9a-f]{64,}\b', re.IGNORECASE)),
-    ("dsn",         re.compile(r'(?i)(mongodb|redis|amqp|mysql|postgres|ldap)://[^\s"\']{10,}')),
-]
+# Raccourcis vers les patterns fréquemment utilisés
+INTERNAL_IP_RE   = _PAT.get("S-02-internal_ip",
+    re.compile(r'\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b'))
+STACK_TRACE_OPEN_RE = _PAT.get("S-03-stack_trace",
+    re.compile(r'(Exception|NullPointerException|Traceback)', re.IGNORECASE))
+STACK_FRAME_RE   = re.compile(r'^\s+at [\w.$]+\([\w.]+(?::\d+)?\)')
+SQL_RE           = _PAT.get("S-04-sql_query",
+    re.compile(r'\b(SELECT|INSERT|UPDATE|DELETE)\b', re.IGNORECASE))
+LOGIN_RE         = _PAT.get("A-login",
+    re.compile(r'\b(login|authentification)\b', re.IGNORECASE))
+LOGOUT_RE        = _PAT.get("A-logout",
+    re.compile(r'\b(logout|déconnexion)\b', re.IGNORECASE))
+USER_RE          = _PAT.get("A-user",
+    re.compile(r'user[\w._-]*[=:"\'\s]+([A-Za-z0-9._@\-]{3,60})', re.IGNORECASE))
+WRITE_ACTIONS_RE = _PAT.get("P-02-write_action",
+    re.compile(r'\b(PUT|POST|DELETE|PATCH)\b', re.IGNORECASE))
+ACTION_TRACE_RE  = _PAT.get("P-02-action_trace",
+    re.compile(r'url\.path|event\.action', re.IGNORECASE))
+PRIVILEGED_RE    = _PAT.get("P-01-privileged_cmd",
+    re.compile(r'\b(sudo|configure|commit)\b', re.IGNORECASE))
+NIGHT_TS_RE      = _PAT.get("P-03-night_activity",
+    re.compile(r'[T\s](0[0-5]|2[2-3]):\d{2}:\d{2}'))
+MSISDN_RE        = _PAT.get("D-01-msisdn",
+    re.compile(r'\b221[37]\d{7,8}\b'))
+EMAIL_RE         = _PAT.get("D-01b-email",
+    re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,10}\b'))
+FULLNAME_RE      = re.compile(r'\b([A-Z]{2,}(?:\s+[A-Z]{2,}){1,3})\b')
+OTP_PIN_RE       = _PAT.get("D-07-otp_pin",
+    re.compile(r'(?i)\b(otp|pin)\s*[=:]\s*\d{4,8}\b'))
+IDENTITY_LABEL_RE = _PAT.get("D-08-identity_label",
+    re.compile(r'(?i)\b(cni|passport)\s*[=:]\s*[A-Z0-9]{5,20}'))
+DOB_LABEL_RE     = _PAT.get("D-08-dob_label",
+    re.compile(r'(?i)\b(dob|date.naissance)\s*[=:]\s*\d{2}.\d{2}.\d{4}'))
+CONTRACT_RE      = _PAT.get("D-10-contract",
+    re.compile(r'(?i)\b(contract|abonnement)\s*[=:]\s*[A-Z0-9]{5,25}'))
+IMEI_RE          = _PAT.get("D-10-imei",   re.compile(r'\b\d{15}\b'))
+ICCID_RE         = _PAT.get("D-10-iccid",  re.compile(r'\b89\d{17,18}\b'))
+IMSI_RE          = _PAT.get("D-10-imsi",   re.compile(r'\b608\d{12}\b'))
+PAN_RE           = _PAT.get("D-05-pan",    re.compile(r'\b(?:\d[ \-]?){13,19}\d\b'))
 
-# ── Patterns PII ─────────────────────────────────────────────────
-
-# Luhn check pour PAN
-def _luhn_ok(n):
-    digits = [int(c) for c in str(n)]
-    digits.reverse()
-    total = 0
-    for i, d in enumerate(digits):
-        if i % 2 == 1:
-            d *= 2
-            if d > 9:
-                d -= 9
-        total += d
-    return total % 10 == 0
-
-# PAN brut (13-19 chiffres, éventuellement séparés par espaces ou tirets)
-PAN_RE = re.compile(r'\b(?:\d[ \-]?){13,19}\d\b')
-
-# OTP / PIN en contexte
-OTP_PIN_RE = re.compile(
-    r'(?i)\b(otp|one.?time.?password|pin|code.?secret|code.?verification'
-    r'|verification.?code|auth.?code|totp|hotp)\s*[=:"\'\s]\s*(\d{4,8})\b'
-)
-
-# Données identitaires par label (CNI, passeport, date naissance)
-IDENTITY_LABEL_RE = re.compile(
-    r'(?i)\b(cni|carte.?nationale|national.?id|id.?card|passport|passeport'
-    r'|id.?number|numero.?identite|identity.?number|nif|nin|ssn|cin)\s*[=:"\':\s]\s*([A-Z0-9\-]{5,20})',
-)
-DOB_LABEL_RE = re.compile(
-    r'(?i)\b(date.?(?:of.?)?birth|date.?naissance|dob|birth.?date|birthdate'
-    r'|naissance|date.?naiss)\s*[=:"\':\s]\s*(\d{2}[\-/\.]\d{2}[\-/\.]\d{2,4}|\d{4}[\-/\.]\d{2}[\-/\.]\d{2})'
-)
-
-# Numéros de contrat / abonnement Orange Sénégal
-CONTRACT_RE = re.compile(
-    r'(?i)\b(contract(?:_?id)?|abonnement|subscription(?:_?id)?|num[ée]ro.?(?:de.?)?(?:contrat|compte|abonnement)'
-    r'|account.?(?:id|number)|msisdn|iccid|imsi|imei)\s*[=:"\':\s]\s*([A-Z0-9\-]{5,25})'
-)
-# IMEI (15 chiffres)
-IMEI_RE = re.compile(r'\b\d{15}\b')
-# ICCID (19-20 chiffres commençant par 89)
-ICCID_RE = re.compile(r'\b89\d{17,18}\b')
-# IMSI (15 chiffres commençant par 608 pour le Sénégal)
-IMSI_RE = re.compile(r'\b608\d{12}\b')
-
-INTERNAL_IP_RE = re.compile(
-    r'\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}'
-    r'|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}'
-    r'|192\.168\.\d{1,3}\.\d{1,3})\b'
-)
-
-STACK_TRACE_OPEN_RE = re.compile(
-    r'(Traceback \(most recent'
-    r'|Exception in thread'
-    r'|java\.\w+\.\w+Exception'
-    r'|org\.\w+\.\w+Exception'
-    r'|NullPointerException'
-    r'|StackOverflowError'
-    r'|File ".*", line \d+'
-    r'|StackTrace:)', re.IGNORECASE
-)
-STACK_FRAME_RE = re.compile(r'^\s+at [\w.$]+\([\w.]+(?::\d+)?\)')
-
-SQL_RE = re.compile(
-    r'\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE)\b.{0,80}\b(FROM|INTO|TABLE|WHERE)\b',
-    re.IGNORECASE
-)
-
+# Timestamps
 TS_PATTERNS = [
-    re.compile(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'),
-    re.compile(r'\d{2}/[A-Za-z]{3}/\d{4}[: ]\d{2}:\d{2}:\d{2}'),
-    re.compile(r'[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}'),
-    re.compile(r'\d{2}/\d{2}/\d{4}[; ]\d{2}:\d{2}:\d{2}'),
-]
-
-LOGIN_RE  = re.compile(r'\b(login|logged.?in|auth(?:entication)?[._\s]success|session[._\s](?:start|open)|sign.?in)\b', re.IGNORECASE)
-LOGOUT_RE = re.compile(r'\b(logout|logged.?out|session[._\s](?:end|close|expir)|sign.?out)\b', re.IGNORECASE)
-USER_RE   = re.compile(r'(?:user(?:id|name|Id)?|userId)[=:"\':\s]+([A-Za-z0-9._@\-]{3,60})', re.IGNORECASE)
-
-WRITE_ACTIONS_RE = re.compile(r'\b(PUT|POST|DELETE|PATCH|CREATE|UPDATE|MODIFY|INSERT|REMOVE|WRITE)\b')
-PRIVILEGED_RE    = re.compile(
-    r'\b(configure|commit|shutdown|reboot|reset\s+password|resetPassword'
-    r'|debug\s+\w+|dump\s+\w+|show\s+running|running[_\-]?config'
-    r'|adduser|createuser|useradd|passwd\b|sudo\s|chmod|chown'
-    r'|iptables|access[._\-]security|removeKeystore|addKeystore)\b',
-    re.IGNORECASE
-)
-
-MSISDN_RE   = re.compile(r'\b(221\s?[37]\d{7,8}|00221[37]\d{7,8})\b')
-EMAIL_RE    = re.compile(r'\b[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,10}\b')
-FULLNAME_RE = re.compile(r'\b([A-Z]{2,}(?:\s+[A-Z]{2,}){1,3})\b')
-NIGHT_TS_RE = re.compile(r'[T\s](0[0-5]|2[2-3]):\d{2}:\d{2}')
-
-PII_JSON_KEYS = {
-    "userid", "user_id", "username", "msisdn", "phone", "phonenumber",
-    "email", "mail", "emailaddress", "e-mail",
-    "fullname", "firstname", "lastname", "name",
-    "sessionid", "session_id", "externalid", "projectid",
-}
-
-SENSITIVE_JSON_KEYS = {
-    "password", "passwd", "secret", "token", "accèss_token", "refresh_token",
-    "api_key", "apikey", "credential", "private_key", "authorization",
-    "client_secret", "jwt", "bearer", "pin", "cvv",
-}
-
-# ─────────────────────────────────────────────────────────────────
-# PATTERNS CONFORMITE
-# ─────────────────────────────────────────────────────────────────
-
-# Chaque exigence : (id, libelle, niveau_si_absent, patterns_detection, description_gap)
-# niveau_si_absent : "CRITIQUE" pour auth/comptes, "MODERE" pour le reste
-
-COMPLIANCE_CHECKS = [
-
-    # ── EVENEMENTS DE SECURITE GENERAUX ─────────────────────────
-    ("C-01",
-     "Activités utilisateurs liees a la sécurité",
-     "MODERE",
-     re.compile(
-         r'\b(security|securite|audit|access|acces|action|activity|activite'
-         r'|event\.type|event\.category|AUDIT)\b', re.IGNORECASE),
-     "Aucune trace d'activité utilisateur liee a la sécurité détectée.\n"
-     "Exigence : journalisation des actions utilisateur significatives "
-     "(consultations, modifications, accès aux ressources)."),
-
-    ("C-02",
-     "Modification des droits d'accès (ajout/suppression/élévation)",
-     "CRITIQUE",
-     re.compile(
-         r'\b(grant|revoke|permission|privilege|role|droit|acces|access.right'
-         r'|elevation|elevat|assign|affectat|suppress|ajout.*role|suppression.*role'
-         r'|addRight|removeRight|updateRole|assignRole)\b', re.IGNORECASE),
-     "Aucune trace de modification de droits d'accès détectée.\n"
-     "Exigence CRITIQUE : toute modification de permission, rôle ou privilège "
-     "doit être journalisée avec l'identité de l'opérateur, l'objet modifié "
-     "et les valeurs avant/après."),
-
-    ("C-03",
-     "Événements de lutte contre les codes malveillants",
-     "MODERE",
-     re.compile(
-         r'\b(malware|virus|antivirus|antimalware|threat|menace|scan|quarantine'
-         r'|detected|blocked|malicious|signature|heuristique)\b', re.IGNORECASE),
-     "Aucun événement de lutte contre les codes malveillants détecté.\n"
-     "Exigence : les alertes antivirus/EDR/IDS doivent être collectées dans les logs."),
-
-    ("C-04",
-     "Exceptions applicatives",
-     "MODERE",
-     re.compile(
-         r'\b(exception|error|erreur|fault|failure|echec|crash'
-         r'|Exception|ERROR)\b', re.IGNORECASE),
-     "Aucune exception ou erreur applicative détectée.\n"
-     "Exigence : toutes les exceptions doivent être journalisées."),
-
-    ("C-05",
-     "Défaillances système",
-     "MODERE",
-     re.compile(
-         r'\b(failure|defaillance|panne|outage|unavailable|indisponible'
-         r'|circuit.breaker|timeout|connexion.refusee|connection.refused'
-         r'|service.unavailable|503|504)\b', re.IGNORECASE),
-     "Aucune défaillance système détectée.\n"
-     "Exigence : les défaillances (timeouts, services indisponibles, pannes) "
-     "doivent être journalisées avec leur contexte."),
-
-    ("C-06",
-     "Actions de consultation (lectures)",
-     "MODERE",
-     re.compile(
-         r'\b(GET|read|lecture|consult|view|list|search|query'
-         r'|Action=.Get.|event\.category=.Enter.)\b', re.IGNORECASE),
-     "Aucune action de consultation (lecture) détectée dans les logs.\n"
-     "Exigence : les accès en lecture aux ressources sensibles doivent être tracés."),
-
-    ("C-07",
-     "Toutes les actions applicatives (entrées et sorties)",
-     "MODERE",
-     re.compile(
-         r'\b(event\.category|event\.action|event\.type'
-         r'|Enter|Exit|request|response|http\.request|http\.response'
-         r'|url\.path|http\.request\.method)\b', re.IGNORECASE),
-     "Les actions applicatives (entrées/sorties de methodes ou requêtes HTTP) "
-     "ne semblent pas systématiquement tracées.\n"
-     "Exigence : chaque appel entrant et sa réponse doivent être journalisés."),
-
-    # ── AUTHENTIFICATION ─────────────────────────────────────────
-    ("C-08",
-     "Réussites d'authentification",
-     "CRITIQUE",
-     re.compile(
-         r'\b(login.success|auth.*success|authentication.*success'
-         r'|logged.in|sign.in|session.*open|session.*start'
-         r'|authenticated|Login)\b', re.IGNORECASE),
-     "Aucune réussite d'authentification détectée.\n"
-     "Exigence CRITIQUE : chaque connexion réussie doit être journalisée "
-     "avec l'identité, l'horodatage et l'IP source."),
-
-    ("C-09",
-     "Échecs d'authentification",
-     "CRITIQUE",
-     re.compile(
-         r'\b(login.fail|auth.*fail|authentication.*fail'
-         r'|invalid.*password|wrong.*password|401|403'
-         r'|access.denied|Invalid.Authentication|challengePassword)\b', re.IGNORECASE),
-     "Aucun échec d'authentification détecté.\n"
-     "Exigence CRITIQUE : chaque échec de connexion doit être journalisé "
-     "pour permettre la detection de brute force."),
-
-    ("C-10",
-     "Mecanismes d'authentification utilisés",
-     "MODERE",
-     re.compile(
-         r'\b(MFA|2FA|OTP|TOTP|LDAP|SSO|OAuth|SAML|Kerberos|SCEP|PKI'
-         r'|certificate|certificat|token.*auth|basic.auth|digest)\b', re.IGNORECASE),
-     "Le mecanisme d'authentification utilisé n'est pas identifiable dans les logs.\n"
-     "Exigence : le type d'authentification (MFA, SSO, certificat...) "
-     "doit apparaître dans chaque événement d'auth."),
-
-    ("C-11",
-     "Élévations de privilèges",
-     "CRITIQUE",
-     re.compile(
-         r'\b(sudo|su\s|elevation|privilege.*escalat|escalat.*privilege'
-         r'|become.*admin|runas|impersonat|switch.*role|elev)\b', re.IGNORECASE),
-     "Aucune élévation de privilège détectée.\n"
-     "Exigence CRITIQUE : toute élévation de privilège doit être journalisée "
-     "avec l'identité de l'opérateur, le privilège acquis et l'horodatage."),
-
-    # ── GESTION DES COMPTES ──────────────────────────────────────
-    ("C-12",
-     "Ajout/suppression de comptes, groupes ou rôles",
-     "CRITIQUE",
-     re.compile(
-         r'\b(adduser|createuser|useradd|create.*account|nouveau.*compte'
-         r'|delete.*user|remove.*user|suppress.*compte|disable.*account'
-         r'|create.*group|delete.*group|add.*role|remove.*role'
-         r'|registerUser|createAccount|deleteAccount)\b', re.IGNORECASE),
-     "Aucune creation ou suppression de compte/groupe/rôle détectée.\n"
-     "Exigence CRITIQUE : chaque ajout ou suppression de compte ou rôle "
-     "doit être journalisé avec l'identité de l'administrateur."),
-
-    ("C-13",
-     "Affectation/suppression de droits aux comptes",
-     "CRITIQUE",
-     re.compile(
-         r'\b(grant|revoke|assign.*right|remove.*right|add.*permission'
-         r'|remove.*permission|affectat.*droit|suppress.*droit'
-         r'|updatePermission|setRole|unsetRole|addRight|removeRight)\b', re.IGNORECASE),
-     "Aucune affectation ou suppression de droits détectée.\n"
-     "Exigence CRITIQUE : chaque modification de droits sur un compte "
-     "doit être journalisée avec les valeurs avant et après."),
-
-    ("C-14",
-     "Modifications des données d'authentification (mot de passe, clé)",
-     "CRITIQUE",
-     re.compile(
-         r'\b(change.*password|reset.*password|password.*change|password.*reset'
-         r'|update.*credential|modify.*credential|passwd.*modif'
-         r'|changePassword|resetPassword|updatePassword|keyRotation'
-         r'|certificate.*renew|cert.*expir)\b', re.IGNORECASE),
-     "Aucune modification de données d'authentification détectée.\n"
-     "Exigence CRITIQUE : les changements de mot de passe, clés ou certificats "
-     "doivent être journalisés (sans exposer les valeurs)."),
-
-    # ── ACCES AUX RESSOURCES ─────────────────────────────────────
-    ("C-15",
-     "Accès en lecture aux ressources",
-     "MODERE",
-     re.compile(
-         r'\b(GET|read|lecture|SELECT|fetch|retrieve|download|consult'
-         r'|Action=.Get.|http\.request\.method=.GET.)\b', re.IGNORECASE),
-     "Aucun accès en lecture aux ressources trace.\n"
-     "Exigence : les lectures sur les ressources sensibles doivent être journalisées."),
-
-    ("C-16",
-     "Accès en ecriture aux ressources",
-     "CRITIQUE",
-     re.compile(
-         r'\b(PUT|POST|DELETE|PATCH|write|ecriture|INSERT|UPDATE|CREATE'
-         r'|Action=.Put.|Action=.Post.|Action=.Delete.'
-         r'|http\.request\.method=.(PUT|POST|DELETE|PATCH).)\b', re.IGNORECASE),
-     "Aucun accès en ecriture (PUT/POST/DELETE) trace.\n"
-     "Exigence CRITIQUE : toute modification de ressource doit être journalisée "
-     "avec l'identité de l'auteur et les données modifiées."),
-
-    ("C-17",
-     "Tentatives d'accès refuses",
-     "MODERE",
-     re.compile(
-         r'\b(401|403|forbidden|access.denied|permission.denied'
-         r'|unauthorized|refuse|denied|rejected)\b', re.IGNORECASE),
-     "Aucune tentative d'accès refuse détectée.\n"
-     "Exigence : les tentatives d'accès non autorisées doivent être journalisées."),
-
-    # ── MODIFICATIONS STRATEGIES SECURITE ────────────────────────
-    ("C-18",
-     "Edition/application/reinitialisation de configurations sécurité",
-     "CRITIQUE",
-     re.compile(
-         r'\b(configure|configuration|config.*change|policy.*change'
-         r'|security.*policy|security.*rule|firewall.*rule|acl.*change'
-         r'|setting.*update|reinitialis|reset.*config|apply.*policy'
-         r'|commit|deploy.*config)\b', re.IGNORECASE),
-     "Aucune modification de stratégie ou configuration de sécurité détectée.\n"
-     "Exigence CRITIQUE : toute modification de politique de sécurité "
-     "(pare-feu, ACL, configuration) doit être journalisée."),
-
-    # ── ACTIVITE DES PROCESSUS ───────────────────────────────────
-    ("C-19",
-     "Démarrages et arrêts de processus/services",
-     "MODERE",
-     re.compile(
-         r'\b(start(?:ing|ed|up)?|stop(?:ping|ped)?|shutdown|restart'
-         r'|initializ|SpringApplication|boot|launch|starting server'
-         r'|Stopping.*worker|graceful.stop|server.*started|server.*stopped'
-         r'|HikariPool.*Starting|HikariPool.*Shutdown)\b', re.IGNORECASE),
-     "Aucun événement de démarrage ou arrêt de processus détecté.\n"
-     "Exigence : les démarrages et arrêts de services doivent être journalisés."),
-
-    ("C-20",
-     "Dysfonctionnements de processus",
-     "MODERE",
-     re.compile(
-         r'\b(crash|hung|freeze|deadlock|OOM|OutOfMemory|memory.*leak'
-         r'|thread.*stuck|process.*kill|SIGKILL|SIGTERM|aborted)\b', re.IGNORECASE),
-     "Aucun dysfonctionnement de processus détecté.\n"
-     "Exigence : les crashs, deadlocks et arrêts anormaux doivent être journalisés."),
-
-    ("C-21",
-     "Chargements/déchargements de modules",
-     "MODERE",
-     re.compile(
-         r'\b(load(?:ing|ed)?.*module|unload.*module|plugin.*load'
-         r'|library.*load|dll.*load|module.*register|bean.*load'
-         r'|component.*init|Registered.*Domain|Registered.*Right)\b', re.IGNORECASE),
-     "Aucun chargement/déchargement de module détecté.\n"
-     "Exigence : les chargements de modules, plugins ou composants "
-     "doivent être tracés pour détectér des injections."),
-
-    # ── ACTIVITE SYSTEME ─────────────────────────────────────────
-    ("C-22",
-     "Démarrages et arrêts système",
-     "MODERE",
-     re.compile(
-         r'\b(system.*start|system.*stop|boot|reboot|poweroff|shutdown'
-         r'|OS.*start|kernel|init.*system|systemd|service.*start'
-         r'|SpringApplicationShutdownHook)\b', re.IGNORECASE),
-     "Aucun événement de démarrage ou arrêt système détecté.\n"
-     "Exigence : les événements système de démarrage/arrêt doivent être collectés."),
-
-    ("C-23",
-     "Dysfonctionnements et surcharges système",
-     "MODERE",
-     re.compile(
-         r'\b(CPU.*high|memory.*high|disk.*full|swap.*full|overload'
-         r'|surcharge|saturation|resource.*exhaust|too.*many.*connection'
-         r'|connection.*pool.*exhaust|HikariPool.*timeout)\b', re.IGNORECASE),
-     "Aucun dysfonctionnement ou surcharge système détecté.\n"
-     "Exigence : les alertes de surcharge (CPU, memoire, disque) "
-     "doivent être journalisées."),
-
-    # ── FORMAT ET QUALITE DES LOGS ───────────────────────────────
-    ("C-24",
-     "Présence d'un horodatage (@timestamp)",
-     "CRITIQUE",
-     re.compile(
-         r'(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'
-         r'|@timestamp|\btime\b|\btimestamp\b)', re.IGNORECASE),
-     "Aucun horodatage detectable dans les logs.\n"
-     "Exigence CRITIQUE : chaque entrée de log doit contenir un timestamp "
-     "precis (format ISO 8601 recommande)."),
-
-    ("C-25",
-     "Présence de l'identité utilisateur dans les événements",
-     "CRITIQUE",
-     re.compile(
-         r'\b(user\.name|user_name|username|userId|user\.id'
-         r'|client\.ip|source\.name|subject)\b', re.IGNORECASE),
-     "L'identité de l'utilisateur n'est pas systématiquement présente.\n"
-     "Exigence CRITIQUE : chaque événement doit inclure l'identité "
-     "de l'acteur (user.name, userId...)."),
-
-    ("C-26",
-     "Présence de l'IP source (client.ip)",
-     "MODERE",
-     re.compile(
-         r'\b(client\.ip|remote\.addr|remote_addr|source\.ip|src\.ip'
-         r'|x-forwarded-for|X-Forwarded-For|remoteHost|clientIp)\b', re.IGNORECASE),
-     "L'adresse IP source n'est pas tracée dans les événements.\n"
-     "Exigence : chaque événement doit inclure l'IP du client émetteur."),
-
-    ("C-27",
-     "Journalisation des appels HTTP (URL, methode, statut réponse)",
-     "MODERE",
-     re.compile(
-         r'\b(url\.path|http\.request\.method|http\.response\.status'
-         r'|http\.response\.status_code|endpoint|route'
-         r'|GET|POST|PUT|DELETE|PATCH)\b.*\b(\d{3})\b'
-         r'|\b(url\.path|http\.request\.method)\b', re.IGNORECASE),
-     "Les appels HTTP (URL, methode, code réponse) ne semblent pas tous tracés.\n"
-     "Exigence : URL appelee, methode HTTP, code de réponse et duree "
-     "doivent figurer dans chaque trace d'appel."),
-
-    ("C-28",
-     "Logs de modification avec valeurs avant/après",
-     "CRITIQUE",
-     re.compile(
-         r'\b(before|after|avant|apres|old.*value|new.*value|previous.*value'
-         r'|ancienne.*valeur|nouvelle.*valeur|from.*to|changed.*from'
-         r'|oldValue|newValue|previousState|newState|before=|after=)\b', re.IGNORECASE),
-     "Aucune trace de modification avec valeurs avant/après détectée.\n"
-     "Exigence CRITIQUE : les logs de modification doivent inclure "
-     "le nom de l'attribut modifié, son etat avant et son etat après modification."),
-
-    # ── MASQUAGE DES DONNEES SENSIBLES ───────────────────────────
-    ("C-29",
-     "Données sensibles masquées (absence de secrets en clair)",
-     "CRITIQUE",
-     None,  # check inverse : on verifie l'ABSENCE via S-01
-     "Des données sensibles non masquées ont ete détectées (voir S-01).\n"
-     "Exigence CRITIQUE : mots de passe, tokens, codes PIN, numéros de carte "
-     "et identifiants nationaux doivent être masqués ([REDACTED]) dans les logs."),
+    _PAT.get("F-01-timestamp_iso",    re.compile(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}')),
+    _PAT.get("F-01-timestamp_clf",    re.compile(r'\d{2}/[A-Za-z]{3}/\d{4}[: ]\d{2}:\d{2}:\d{2}')),
+    _PAT.get("F-01-timestamp_syslog", re.compile(r'[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}')),
+    _PAT.get("F-01-timestamp_custom", re.compile(r'\d{2}/\d{2}/\d{4}[; ]\d{2}:\d{2}:\d{2}')),
 ]
 
 
@@ -681,6 +382,20 @@ def _flatten_csv(raw):
 # CHECKS
 # ─────────────────────────────────────────────────────────────────
 
+def _luhn_ok(n: str) -> bool:
+    """Vérifie qu'un numéro de carte passe l'algorithme de Luhn."""
+    digits = [int(c) for c in str(n)]
+    digits.reverse()
+    total = 0
+    for i, d in enumerate(digits):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
 def run_checks(path, fmt, lines):
     findings = []
     total = len(lines)
@@ -694,10 +409,10 @@ def run_checks(path, fmt, lines):
     # S-01 Secrets / credentials
     secret_hits = []
     seen = set()
-    for label, pat in SENSITIVE_PATTERNS:
+    for pat_id, pat_group, pat_re in SENSITIVE_PATTERNS:
         for ln, text in lines:
-            if pat.search(text) and ln not in seen:
-                secret_hits.append((ln, f"[{label}] {text}"))
+            if pat_re.search(text) and ln not in seen:
+                secret_hits.append((ln, f"[{pat_id}] {text}"))
                 seen.add(ln)
 
     if secret_hits:
@@ -957,41 +672,55 @@ def run_checks(path, fmt, lines):
     else:
         findings.append(Finding("P-01", "P", "Aucune commande privilegiee détectée", "OK", "", []))
 
-    # P-02 Actions ecriture vs lecture
-    write_hits = grep(WRITE_ACTIONS_RE)
-    read_hits  = grep(re.compile(r'\bGET\b'))
+    # P-02 Traçabilité des actions (URL / event.action / verbe HTTP)
+    action_trace_hits = grep(ACTION_TRACE_RE)
+    write_hits        = grep(WRITE_ACTIONS_RE)
+    read_hits         = grep(re.compile(
+        r'\bGET\b|http\.request\.method\s*[=:]\s*["\']?GET["\']?', re.IGNORECASE
+    ))
 
-    if read_hits and not write_hits:
+    if action_trace_hits:
+        write_count = len(write_hits)
         findings.append(Finding(
             "P-02", "P",
-            "Seules les lectures (GET) sont tracées -- aucune action d'ecriture",
+            f"Actions applicatives tracées : {len(action_trace_hits)} événement(s) avec URL/action",
+            "OK",
+            f"Les appels sont tracés avec leur URL ou libellé d'action ({len(action_trace_hits)} occurrences).\n"
+            f"Actions d'écriture détectées en complément : {write_count}.",
+            fmt_excerpt(action_trace_hits[:3]), ""
+        ))
+    elif read_hits and not write_hits:
+        findings.append(Finding(
+            "P-02", "P",
+            "Seules les lectures (GET) sont tracées — aucune action d'écriture",
             "CRITIQUE",
             f"{len(read_hits)} GET détectés, 0 PUT/POST/DELETE/PATCH.\n"
-            "Sans trace des modifications, la reconstitution d'une sequence d'actions "
+            "Sans trace des modifications, la reconstitution d'une séquence d'actions "
             "est impossible lors d'un incident.",
             fmt_excerpt(read_hits[:3]),
-            f"grep -P '\\b(PUT|POST|DELETE|PATCH|UPDATE)\\b' {path.name}"
+            f"grep -iP '(PUT|POST|DELETE|PATCH|url\\.path|event\\.action)' {path.name}"
         ))
     elif write_hits:
         wt = Counter()
         for _, t in write_hits:
             m = WRITE_ACTIONS_RE.search(t)
             if m:
-                wt[m.group(0).upper()] += 1
+                val = next((g for g in m.groups() if g), '?')
+                wt[val.upper()] += 1
         findings.append(Finding(
             "P-02", "P",
-            f"Actions d'ecriture tracées : {dict(wt.most_common())}",
+            f"Actions d'écriture tracées : {dict(wt.most_common())}",
             "OK",
-            "Les operations de modification sont présentes dans les logs.",
+            "Les opérations de modification sont présentes dans les logs.",
             fmt_excerpt(write_hits[:2]), ""
         ))
     else:
         findings.append(Finding(
             "P-02", "P",
-            "Aucun verbe HTTP ou action CRUD détecté",
+            "Aucune action tracée (pas d'URL, d'event.action ni de verbe HTTP)",
             "FAIBLE",
-            "Le fichier ne contient pas de tracés d'API REST ou d'actions CRUD identifiables.",
-            [], f"grep -P '\\b(GET|PUT|POST|DELETE|PATCH)\\b' {path.name}"
+            "Le fichier ne contient pas de traces d'appels HTTP, d'URL ou d'actions métier identifiables.",
+            [], f"grep -iP '(url\\.path|event\\.action|GET|POST|PUT|DELETE)' {path.name}"
         ))
 
     # P-03 Acces hors horaires
@@ -1066,13 +795,12 @@ def run_checks(path, fmt, lines):
     # D-02 Noms complets en clair (heuristique)
     name_hits = []
     for ln, text in lines:
+        # Exclure les lignes dont le contexte est clairement technique
+        if FULLNAME_EXCLUSION_RE and FULLNAME_EXCLUSION_RE.search(text):
+            continue
         for m in FULLNAME_RE.finditer(text):
             val = m.group(0)
             if (len(val.split()) >= 2
-                    and not re.search(
-                        r'(ERROR|INFO|WARN|DEBUG|HTTP|API|SQL|JWT|SSL|TLS|PKI|SCEP|HSS|RSA'
-                        r'|GET|PUT|POST|DELETE|SPRING|HIBERNATE|TOMCAT)',
-                        val)
                     and not re.search(r'\.(java|log|xml|yml|json)$', val, re.IGNORECASE)):
                 name_hits.append((ln, f"Nom détecté : {val}  |  {text[:100]}"))
                 break
@@ -1132,17 +860,10 @@ def run_checks(path, fmt, lines):
         ))
 
     # D-05 PAN carte bancaire (vérification Luhn)
-    # Filtre contextuel : exclure les lignes dont le contexte indique clairement
-    # des valeurs numériques techniques (modèles statistiques, IDs internes, captures réseau)
-    PAN_EXCLUSION_RE = re.compile(
-        r'(OLS|regression|predictor|model|coefficient|parameter|pattern|capture'
-        r'|flood|statistic|matrix|vector|hash|checksum|crc|sequence|offset'
-        r'|bytes|packet|frame|counter|metric|gauge|sample|timestamp)',
-        re.IGNORECASE
-    )
+    # Filtre contextuel chargé depuis pan_exclusion_terms dans patterns.yaml
     pan_hits = []
     for ln, text in lines:
-        if PAN_EXCLUSION_RE.search(text):
+        if PAN_EXCLUSION_RE and PAN_EXCLUSION_RE.search(text):
             continue
         for m in PAN_RE.finditer(text):
             raw = re.sub(r'[ \-]', '', m.group(0))
@@ -1195,11 +916,15 @@ def run_checks(path, fmt, lines):
         ))
 
     # D-10 Identifiants télécom (IMEI, ICCID, IMSI, contrat)
-    imei_hits  = [(ln, t) for ln, t in grep(IMEI_RE)
-                  if not re.search(r'\d{16,}', t)]  # éviter les timestamps epoch longs
-    iccid_hits = grep(ICCID_RE)
-    imsi_hits  = grep(IMSI_RE)
-    contract_hits = grep(CONTRACT_RE)
+    # Filtre contextuel : exclure les lignes techniques (statistiques, réseau, anti-DDoS)
+    def _not_telecom_noise(t):
+        return not (TELECOM_EXCLUSION_RE and TELECOM_EXCLUSION_RE.search(t))
+
+    imei_hits = [(ln, t) for ln, t in grep(IMEI_RE)
+                 if not re.search(r'\d{16,}', t) and _not_telecom_noise(t)]
+    iccid_hits    = [(ln, t) for ln, t in grep(ICCID_RE)    if _not_telecom_noise(t)]
+    imsi_hits     = [(ln, t) for ln, t in grep(IMSI_RE)     if _not_telecom_noise(t)]
+    contract_hits = [(ln, t) for ln, t in grep(CONTRACT_RE) if _not_telecom_noise(t)]
     telecom_total = len(imei_hits) + len(iccid_hits) + len(imsi_hits) + len(contract_hits)
     if telecom_total > 0:
         ex = fmt_excerpt((contract_hits + imsi_hits + iccid_hits + imei_hits)[:8])
