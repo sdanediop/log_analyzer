@@ -1,0 +1,341 @@
+# compliance.yaml
+# Exigences de conformité pour l'audit de logs
+#
+# Structure de chaque entrée :
+#   id              : identifiant de l'exigence (C-xx)
+#   group           : groupe fonctionnel
+#   title           : libellé de l'exigence
+#   level_if_absent : niveau remonté si l'exigence n'est pas satisfaite
+#                     CRITIQUE = bloquant avant mise en production
+#                     MODERE   = à vérifier (peut être absent dans l'extraction)
+#   pattern         : regex de détection de la présence de l'événement
+#                     null = check inverse (vérification de l'absence via autre check)
+#   gap_description : texte affiché si l'exigence n'est pas satisfaite
+#
+# Ajouter une exigence : copier un bloc, incrémenter l'id
+# Désactiver une exigence : ajouter `enabled: false`
+
+
+# ═══════════════════════════════════════════════════════════════
+# ÉVÉNEMENTS DE SÉCURITÉ GÉNÉRAUX
+# ═══════════════════════════════════════════════════════════════
+
+compliance_checks:
+
+  - id: C-01
+    group: Événements de sécurité généraux
+    title: Activités utilisateurs liées à la sécurité
+    level_if_absent: MODERE
+    pattern: '\b(security|securite|audit|access|acces|action|activity|activite|event\.type|event\.category|AUDIT)\b'
+    gap_description: |
+      Aucune trace d'activité utilisateur liée à la sécurité détectée.
+      Exigence : journalisation des actions utilisateur significatives
+      (consultations, modifications, accès aux ressources).
+
+  - id: C-02
+    group: Événements de sécurité généraux
+    title: Modification des droits d'accès (ajout/suppression/élévation)
+    level_if_absent: CRITIQUE
+    pattern: '\b(grant|revoke|permission|privilege|role|droit|acces|access.right|elevation|elevat|assign|affectat|suppress|ajout.*role|suppression.*role|addRight|removeRight|updateRole|assignRole)\b'
+    gap_description: |
+      Aucune trace de modification de droits d'accès détectée.
+      Exigence CRITIQUE : toute modification de permission, rôle ou privilège
+      doit être journalisée avec l'identité de l'opérateur, l'objet modifié
+      et les valeurs avant/après.
+
+  - id: C-03
+    group: Événements de sécurité généraux
+    title: Événements de lutte contre les codes malveillants
+    level_if_absent: MODERE
+    pattern: '\b(malware|virus|antivirus|antimalware|threat|menace|scan|quarantine|detected|blocked|malicious|signature|heuristique)\b'
+    gap_description: |
+      Aucun événement de lutte contre les codes malveillants détecté.
+      Exigence : les alertes antivirus/EDR/IDS doivent être collectées dans les logs.
+
+  - id: C-04
+    group: Événements de sécurité généraux
+    title: Exceptions applicatives
+    level_if_absent: MODERE
+    pattern: '\b(exception|error|erreur|fault|failure|echec|crash|Exception|ERROR)\b'
+    gap_description: |
+      Aucune exception ou erreur applicative détectée.
+      Exigence : toutes les exceptions doivent être journalisées.
+
+  - id: C-05
+    group: Événements de sécurité généraux
+    title: Défaillances système
+    level_if_absent: MODERE
+    pattern: '\b(failure|defaillance|panne|outage|unavailable|indisponible|circuit.breaker|timeout|connexion.refusee|connection.refused|service.unavailable|503|504)\b'
+    gap_description: |
+      Aucune défaillance système détectée.
+      Exigence : les défaillances (timeouts, services indisponibles, pannes)
+      doivent être journalisées avec leur contexte.
+
+  - id: C-06
+    group: Événements de sécurité généraux
+    title: Actions de consultation (lectures)
+    level_if_absent: MODERE
+    pattern: '\b(GET|read|lecture|consult|view|list|search|query|Action=.Get.|event\.category=.Enter.)\b'
+    gap_description: |
+      Aucune action de consultation (lecture) détectée dans les logs.
+      Exigence : les accès en lecture aux ressources sensibles doivent être tracés.
+
+  - id: C-07
+    group: Événements de sécurité généraux
+    title: Toutes les actions applicatives (entrées et sorties)
+    level_if_absent: MODERE
+    pattern: '\b(event\.category|event\.action|event\.type|Enter|Exit|request|response|http\.request|http\.response|url\.path|http\.request\.method)\b'
+    gap_description: |
+      Les actions applicatives (entrées/sorties de méthodes ou requêtes HTTP)
+      ne semblent pas systématiquement tracées.
+      Exigence : chaque appel entrant et sa réponse doivent être journalisés.
+
+
+# ═══════════════════════════════════════════════════════════════
+# AUTHENTIFICATION
+# ═══════════════════════════════════════════════════════════════
+
+  - id: C-08
+    group: Authentification
+    title: Réussites d'authentification
+    level_if_absent: CRITIQUE
+    pattern: '\b(login.success|auth.*success|authentication.*success|logged.in|sign.in|session.*open|session.*start|authenticated|Login)\b'
+    gap_description: |
+      Aucune réussite d'authentification détectée.
+      Exigence CRITIQUE : chaque connexion réussie doit être journalisée
+      avec l'identité, l'horodatage et l'IP source.
+
+  - id: C-09
+    group: Authentification
+    title: Échecs d'authentification
+    level_if_absent: CRITIQUE
+    pattern: '\b(login.fail|auth.*fail|authentication.*fail|invalid.*password|wrong.*password|401|403|access.denied|Invalid.Authentication|challengePassword)\b'
+    gap_description: |
+      Aucun échec d'authentification détecté.
+      Exigence CRITIQUE : chaque échec de connexion doit être journalisé
+      pour permettre la détection de brute force.
+
+  - id: C-10
+    group: Authentification
+    title: Mécanismes d'authentification utilisés
+    level_if_absent: MODERE
+    pattern: '\b(MFA|2FA|OTP|TOTP|LDAP|SSO|OAuth|SAML|Kerberos|SCEP|PKI|certificate|certificat|token.*auth|basic.auth|digest)\b'
+    gap_description: |
+      Le mécanisme d'authentification utilisé n'est pas identifiable dans les logs.
+      Exigence : le type d'authentification (MFA, SSO, certificat...)
+      doit apparaître dans chaque événement d'auth.
+
+  - id: C-11
+    group: Authentification
+    title: Élévations de privilèges
+    level_if_absent: CRITIQUE
+    pattern: '\b(sudo|su\s|elevation|privilege.*escalat|escalat.*privilege|become.*admin|runas|impersonat|switch.*role|elev)\b'
+    gap_description: |
+      Aucune élévation de privilège détectée.
+      Exigence CRITIQUE : toute élévation de privilège doit être journalisée
+      avec l'identité de l'opérateur, le privilège acquis et l'horodatage.
+
+
+# ═══════════════════════════════════════════════════════════════
+# GESTION DES COMPTES ET UTILISATEURS
+# ═══════════════════════════════════════════════════════════════
+
+  - id: C-12
+    group: Gestion des comptes
+    title: Ajout/suppression de comptes, groupes ou rôles
+    level_if_absent: CRITIQUE
+    pattern: '\b(adduser|createuser|useradd|create.*account|nouveau.*compte|delete.*user|remove.*user|suppress.*compte|disable.*account|create.*group|delete.*group|add.*role|remove.*role|registerUser|createAccount|deleteAccount)\b'
+    gap_description: |
+      Aucune création ou suppression de compte/groupe/rôle détectée.
+      Exigence CRITIQUE : chaque ajout ou suppression de compte ou rôle
+      doit être journalisé avec l'identité de l'administrateur.
+
+  - id: C-13
+    group: Gestion des comptes
+    title: Affectation/suppression de droits aux comptes
+    level_if_absent: CRITIQUE
+    pattern: '\b(grant|revoke|assign.*right|remove.*right|add.*permission|remove.*permission|affectat.*droit|suppress.*droit|updatePermission|setRole|unsetRole|addRight|removeRight)\b'
+    gap_description: |
+      Aucune affectation ou suppression de droits détectée.
+      Exigence CRITIQUE : chaque modification de droits sur un compte
+      doit être journalisée avec les valeurs avant et après.
+
+  - id: C-14
+    group: Gestion des comptes
+    title: Modifications des données d'authentification (mot de passe, clé)
+    level_if_absent: CRITIQUE
+    pattern: '\b(change.*password|reset.*password|password.*change|password.*reset|update.*credential|modify.*credential|passwd.*modif|changePassword|resetPassword|updatePassword|keyRotation|certificate.*renew|cert.*expir)\b'
+    gap_description: |
+      Aucune modification de données d'authentification détectée.
+      Exigence CRITIQUE : les changements de mot de passe, clés ou certificats
+      doivent être journalisés (sans exposer les valeurs).
+
+
+# ═══════════════════════════════════════════════════════════════
+# ACCÈS AUX RESSOURCES
+# ═══════════════════════════════════════════════════════════════
+
+  - id: C-15
+    group: Accès aux ressources
+    title: Accès en lecture aux ressources
+    level_if_absent: MODERE
+    pattern: '\b(GET|read|lecture|SELECT|fetch|retrieve|download|consult|Action=.Get.|http\.request\.method=.GET.)\b'
+    gap_description: |
+      Aucun accès en lecture aux ressources tracé.
+      Exigence : les lectures sur les ressources sensibles doivent être journalisées.
+
+  - id: C-16
+    group: Accès aux ressources
+    title: Accès en écriture aux ressources
+    level_if_absent: CRITIQUE
+    pattern: '\b(PUT|POST|DELETE|PATCH|write|ecriture|INSERT|UPDATE|CREATE|Action=.Put.|Action=.Post.|Action=.Delete.|http\.request\.method=.(PUT|POST|DELETE|PATCH).)\b'
+    gap_description: |
+      Aucun accès en écriture (PUT/POST/DELETE) tracé.
+      Exigence CRITIQUE : toute modification de ressource doit être journalisée
+      avec l'identité de l'auteur et les données modifiées.
+
+  - id: C-17
+    group: Accès aux ressources
+    title: Tentatives d'accès refusées
+    level_if_absent: MODERE
+    pattern: '\b(401|403|forbidden|access.denied|permission.denied|unauthorized|refuse|denied|rejected)\b'
+    gap_description: |
+      Aucune tentative d'accès refusée détectée.
+      Exigence : les tentatives d'accès non autorisées doivent être journalisées.
+
+
+# ═══════════════════════════════════════════════════════════════
+# MODIFICATIONS DE STRATÉGIES DE SÉCURITÉ
+# ═══════════════════════════════════════════════════════════════
+
+  - id: C-18
+    group: Stratégies de sécurité
+    title: Édition/application/réinitialisation de configurations sécurité
+    level_if_absent: CRITIQUE
+    pattern: '\b(configure|configuration|config.*change|policy.*change|security.*policy|security.*rule|firewall.*rule|acl.*change|setting.*update|reinitialis|reset.*config|apply.*policy|commit|deploy.*config)\b'
+    gap_description: |
+      Aucune modification de stratégie ou configuration de sécurité détectée.
+      Exigence CRITIQUE : toute modification de politique de sécurité
+      (pare-feu, ACL, configuration) doit être journalisée.
+
+
+# ═══════════════════════════════════════════════════════════════
+# ACTIVITÉ DES PROCESSUS
+# ═══════════════════════════════════════════════════════════════
+
+  - id: C-19
+    group: Activité des processus
+    title: Démarrages et arrêts de processus/services
+    level_if_absent: MODERE
+    pattern: '\b(start(?:ing|ed|up)?|stop(?:ping|ped)?|shutdown|restart|initializ|SpringApplication|boot|launch|starting server|Stopping.*worker|graceful.stop|server.*started|server.*stopped|HikariPool.*Starting|HikariPool.*Shutdown)\b'
+    gap_description: |
+      Aucun événement de démarrage ou arrêt de processus détecté.
+      Exigence : les démarrages et arrêts de services doivent être journalisés.
+
+  - id: C-20
+    group: Activité des processus
+    title: Dysfonctionnements de processus
+    level_if_absent: MODERE
+    pattern: '\b(crash|hung|freeze|deadlock|OOM|OutOfMemory|memory.*leak|thread.*stuck|process.*kill|SIGKILL|SIGTERM|aborted)\b'
+    gap_description: |
+      Aucun dysfonctionnement de processus détecté.
+      Exigence : les crashs, deadlocks et arrêts anormaux doivent être journalisés.
+
+  - id: C-21
+    group: Activité des processus
+    title: Chargements/déchargements de modules
+    level_if_absent: MODERE
+    pattern: '\b(load(?:ing|ed)?.*module|unload.*module|plugin.*load|library.*load|dll.*load|module.*register|bean.*load|component.*init|Registered.*Domain|Registered.*Right)\b'
+    gap_description: |
+      Aucun chargement/déchargement de module détecté.
+      Exigence : les chargements de modules, plugins ou composants
+      doivent être tracés pour détecter des injections.
+
+
+# ═══════════════════════════════════════════════════════════════
+# ACTIVITÉ SYSTÈME
+# ═══════════════════════════════════════════════════════════════
+
+  - id: C-22
+    group: Activité système
+    title: Démarrages et arrêts système
+    level_if_absent: MODERE
+    pattern: '\b(system.*start|system.*stop|boot|reboot|poweroff|shutdown|OS.*start|kernel|init.*system|systemd|service.*start|SpringApplicationShutdownHook)\b'
+    gap_description: |
+      Aucun événement de démarrage ou arrêt système détecté.
+      Exigence : les événements système de démarrage/arrêt doivent être collectés.
+
+  - id: C-23
+    group: Activité système
+    title: Dysfonctionnements et surcharges système
+    level_if_absent: MODERE
+    pattern: '\b(CPU.*high|memory.*high|disk.*full|swap.*full|overload|surcharge|saturation|resource.*exhaust|too.*many.*connection|connection.*pool.*exhaust|HikariPool.*timeout)\b'
+    gap_description: |
+      Aucun dysfonctionnement ou surcharge système détecté.
+      Exigence : les alertes de surcharge (CPU, mémoire, disque)
+      doivent être journalisées.
+
+
+# ═══════════════════════════════════════════════════════════════
+# FORMAT ET QUALITÉ DES LOGS
+# ═══════════════════════════════════════════════════════════════
+
+  - id: C-24
+    group: Format et qualité
+    title: Présence d'un horodatage (@timestamp)
+    level_if_absent: CRITIQUE
+    pattern: '(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}|@timestamp|\btime\b|\btimestamp\b)'
+    gap_description: |
+      Aucun horodatage détectable dans les logs.
+      Exigence CRITIQUE : chaque entrée de log doit contenir un timestamp
+      précis (format ISO 8601 recommandé).
+
+  - id: C-25
+    group: Format et qualité
+    title: Présence de l'identité utilisateur dans les événements
+    level_if_absent: CRITIQUE
+    pattern: '\b(user\.name|user_name|username|userId|user\.id|client\.ip|source\.name|subject)\b'
+    gap_description: |
+      L'identité de l'utilisateur n'est pas systématiquement présente.
+      Exigence CRITIQUE : chaque événement doit inclure l'identité
+      de l'acteur (user.name, userId...).
+
+  - id: C-26
+    group: Format et qualité
+    title: Présence de l'IP source (client.ip)
+    level_if_absent: MODERE
+    pattern: '\b(client\.ip|remote\.addr|remote_addr|source\.ip|src\.ip|x-forwarded-for|X-Forwarded-For|remoteHost|clientIp)\b'
+    gap_description: |
+      L'adresse IP source n'est pas tracée dans les événements.
+      Exigence : chaque événement doit inclure l'IP du client émetteur.
+
+  - id: C-27
+    group: Format et qualité
+    title: Journalisation des appels HTTP (URL, méthode, statut réponse)
+    level_if_absent: MODERE
+    pattern: '\b(url\.path|http\.request\.method|http\.response\.status|http\.response\.status_code|endpoint|route|GET|POST|PUT|DELETE|PATCH)\b.*\b(\d{3})\b|\b(url\.path|http\.request\.method)\b'
+    gap_description: |
+      Les appels HTTP (URL, méthode, code réponse) ne semblent pas tous tracés.
+      Exigence : URL appelée, méthode HTTP, code de réponse et durée
+      doivent figurer dans chaque trace d'appel.
+
+  - id: C-28
+    group: Format et qualité
+    title: Logs de modification avec valeurs avant/après
+    level_if_absent: CRITIQUE
+    pattern: '\b(before|after|avant|apres|old.*value|new.*value|previous.*value|ancienne.*valeur|nouvelle.*valeur|from.*to|changed.*from|oldValue|newValue|previousState|newState|before=|after=)\b'
+    gap_description: |
+      Aucune trace de modification avec valeurs avant/après détectée.
+      Exigence CRITIQUE : les logs de modification doivent inclure
+      le nom de l'attribut modifié, son état avant et son état après modification.
+
+  - id: C-29
+    group: Masquage des données sensibles
+    title: Données sensibles masquées (absence de secrets en clair)
+    level_if_absent: CRITIQUE
+    pattern: null
+    gap_description: |
+      Des données sensibles non masquées ont été détectées (voir S-01).
+      Exigence CRITIQUE : mots de passe, tokens, codes PIN, numéros de carte
+      et identifiants nationaux doivent être masqués ([REDACTED]) dans les logs.
+    note: Check inverse — déclenché si S-01 remonte des secrets en clair
