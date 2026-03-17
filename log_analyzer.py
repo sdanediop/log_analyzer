@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-log_audit.py  v3.0
+log_analyzer.py  v3.0
 Audit de sécurité — fichiers logs (texte, JSON, CSV)
 
 Les patterns de détection et les exigences de conformité sont définis
@@ -9,9 +9,9 @@ dans des fichiers YAML séparés, dans le même répertoire que ce script :
     compliance.yaml — exigences de conformité C-01 à C-29
 
 Usage:
-    python3 log_audit.py fichier.log
-    python3 log_audit.py *.log *.json *.csv --output rapport.html
-    python3 log_audit.py --dir /chemin/logs --output rapport.html
+    python3 log_analyzer.py fichier.log
+    python3 log_analyzer.py *.log *.json *.csv --output rapport.html
+    python3 log_analyzer.py --dir /chemin/logs --output rapport.html
 
 Formats supportés:
     - Texte brut / semi-structuré (Spring Boot, syslog, custom)
@@ -1483,8 +1483,8 @@ def main():
 
     if not targets:
         print("Aucun fichier trouvé. Usage :")
-        print("  python3 log_audit.py fichier.log")
-        print("  python3 log_audit.py --dir /chemin/logs")
+        print("  python3 log_analyzer.py fichier.log")
+        print("  python3 log_analyzer.py --dir /chemin/logs")
         sys.exit(1)
 
     results            = {}
