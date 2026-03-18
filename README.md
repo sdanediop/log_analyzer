@@ -11,8 +11,9 @@ Les patterns de détection et les exigences de conformité sont **externalisés 
 ```
 log_analyzer/
 ├── log_analyzer.py    # Moteur d'analyse et génération du rapport HTML
-├── patterns.yaml      # Patterns de détection (sécurité, PII, auth, privilèges)
-├── compliance.yaml    # Exigences de conformité (C-01 à C-29)
+├── patterns/
+│   ├── patterns.yaml      # Patterns de détection (sécurité, PII, auth, privilèges)
+│   └── compliance.yaml    # Exigences de conformité (C-01 à C-29)
 └── README.md
 ```
 
@@ -124,7 +125,7 @@ Formats testés : Spring Boot, syslog CEF, Allot DSC, logs applicatifs custom.
 |---|---|---|
 | D-01 | Numéros MSISDN sénégalais (`221[37]…`, `221[77]…`) | CRITIQUE |
 | D-01b | Adresses email en clair | ÉLEVÉ |
-| D-02 | Noms complets en majuscules (heuristique, avec liste d'exclusion configurable) | ÉLEVÉ |
+| D-02 | Noms de personnes par label contextuel (`nom=`, `fullname=`, `client_name=`…) | ÉLEVÉ |
 | D-03 | Champs PII dans structures JSON (`userId`, `email`, `client.ip`, `sessionId`…) | ÉLEVÉ |
 | D-04 | Données financières Mobile Money (`solde`, `FCFA`, `Orange Money`, `balance`…) | ÉLEVÉ |
 | D-05 | Numéros de carte bancaire PAN — vérification Luhn + filtre contextuel configurable | CRITIQUE |
@@ -164,9 +165,9 @@ Le header affiche simultanément le **niveau de risque sécurité** et le **stat
 
 ---
 
-## Configuration des patterns (patterns.yaml)
+## Configuration des patterns (patterns/patterns.yaml)
 
-Tous les patterns de détection sont dans `patterns.yaml`. Aucune modification du code n'est nécessaire pour ajuster la détection.
+Tous les patterns de détection sont dans `patterns/patterns.yaml`. Aucune modification du code n'est nécessaire pour ajuster la détection.
 
 **Modifier un pattern :**
 ```yaml
@@ -186,23 +187,17 @@ Tous les patterns de détection sont dans `patterns.yaml`. Aucune modification d
 
 **Ajouter un terme à une liste d'exclusion (faux positifs) :**
 ```yaml
-# Faux positifs D-02 (noms de personnes)
-fullname_exclusion_terms:
-  - DSC CLI
-  - GROUP ID
-  - MON_TERME_TECHNIQUE   # ajouter ici
-
 # Faux positifs D-05 (PAN carte bancaire)
 pan_exclusion_terms:
   - OLS
   - regression
-  - MON_CONTEXTE_TECHNIQUE
+  - MON_CONTEXTE_TECHNIQUE   # ajouter ici
 
 # Faux positifs D-10 (identifiants télécom)
 telecom_exclusion_terms:
   - FloodAnalyzer
   - RequestCapture
-  - MON_COMPOSANT
+  - MON_COMPOSANT             # ajouter ici
 ```
 
 **Ajouter une clé PII pour la détection JSON (D-03) :**
@@ -212,9 +207,14 @@ pii_json_keys:
   - ma_nouvelle_cle
 ```
 
+> **Note sur D-02 (noms de personnes)** — Ce pattern utilise une approche par label contextuel
+> (`nom=`, `fullname=`, `client_name=`…) et est défini directement dans le code pour des raisons
+> de compatibilité regex (word boundaries et accents ne survivent pas au parsing YAML).
+> Pour l'étendre, modifier `FULLNAME_RE` dans `log_analyzer.py`.
+
 ---
 
-## Configuration des exigences de conformité (compliance.yaml)
+## Configuration des exigences de conformité (patterns/compliance.yaml)
 
 ```yaml
 - id: C-08
@@ -251,7 +251,7 @@ pii_json_keys:
 
 ## Limites connues
 
-- **D-02 (noms)** — heuristique basée sur les séquences en majuscules. Les termes techniques sont filtrés via `fullname_exclusion_terms` dans `patterns.yaml`. Ajouter à cette liste tout terme qui génère des faux positifs sur ton environnement.
+- **D-02 (noms)** — détection par label contextuel (`nom=`, `fullname=`, `client_name=`…) avec séparateur strict (`=`, `:`, `"`). Ne détecte que les noms précédés d'un champ identifié — zéro faux positif sur les termes techniques, SQL ou composants applicatifs. Pour ajouter un nouveau label, modifier `FULLNAME_RE` dans `log_analyzer.py`.
 - **D-05 (PAN)** — vérification Luhn appliquée. Des valeurs numériques statistiques (modèles OLS, coefficients anti-DDoS) peuvent passer le test par coïncidence. Filtre contextuel via `pan_exclusion_terms`.
 - **D-08 (identité)** — détection par label uniquement (`cni=`, `dob=`…). Les valeurs sans label contextuel ne sont pas détectées.
 - **D-10 (IMEI)** — filtre contextuel via `telecom_exclusion_terms` pour exclure les faux positifs liés aux modèles statistiques réseau.
