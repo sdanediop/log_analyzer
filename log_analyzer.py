@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-log_analyzer.py  v3.0
+log_analyzer.py  v3.1
 Audit de sécurité — fichiers logs (texte, JSON, CSV)
 
 Les patterns de détection et les exigences de conformité sont définis
@@ -43,10 +43,11 @@ except ImportError:
 # CHARGEMENT DES PATTERNS YAML
 # ─────────────────────────────────────────────────────────────────
 
-_SCRIPT_DIR = Path(__file__).parent
+_SCRIPT_DIR  = Path(__file__).parent
+_CONFIG_DIR  = _SCRIPT_DIR / "patterns"
 
 def _load_yaml(filename: str) -> dict:
-    path = _SCRIPT_DIR / filename
+    path = _CONFIG_DIR / filename
     if not path.exists():
         print(f"Erreur : fichier de configuration introuvable : {path}")
         sys.exit(1)
@@ -102,11 +103,10 @@ def _load_patterns():
         return re.compile("|".join(re.escape(t) for t in terms), re.IGNORECASE)
 
     pan_exclusion_re      = _build_exclusion_re(data.get("pan_exclusion_terms", []))
-    fullname_exclusion_re = _build_exclusion_re(data.get("fullname_exclusion_terms", []))
     telecom_exclusion_re  = _build_exclusion_re(data.get("telecom_exclusion_terms", []))
 
     return (sensitive_patterns, by_id, pii_json_keys, sensitive_json_keys,
-            pan_exclusion_re, fullname_exclusion_re, telecom_exclusion_re)
+            pan_exclusion_re, telecom_exclusion_re)
 
 def _load_compliance():
     """Charge compliance.yaml et retourne COMPLIANCE_CHECKS."""
@@ -131,7 +131,6 @@ def _load_compliance():
  PII_JSON_KEYS,
  SENSITIVE_JSON_KEYS,
  PAN_EXCLUSION_RE,
- FULLNAME_EXCLUSION_RE,
  TELECOM_EXCLUSION_RE) = _load_patterns()
 
 COMPLIANCE_CHECKS = _load_compliance()
@@ -165,7 +164,13 @@ MSISDN_RE        = _PAT.get("D-01-msisdn",
     re.compile(r'\b221[37]\d{7,8}\b'))
 EMAIL_RE         = _PAT.get("D-01b-email",
     re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,10}\b'))
-FULLNAME_RE      = re.compile(r'\b([A-Z]{2,}(?:\s+[A-Z]{2,}){1,3})\b')
+FULLNAME_RE = re.compile(
+    r'(?i)\b(nom|prenom|pr\xe9nom|firstname|lastname|fullname|full_name'
+    r'|nom_complet|client_name|customer_name|beneficiaire|destinataire|expediteur)'
+    r'\s*[=:]\s*"?'
+    r'([A-Za-z\xc0-\xff\-]{2,}(?:\s+[A-Za-z\xc0-\xff\-]{2,}){1,3})'
+    r'"?'
+)
 OTP_PIN_RE       = _PAT.get("D-07-otp_pin",
     re.compile(r'(?i)\b(otp|pin)\s*[=:]\s*\d{4,8}\b'))
 IDENTITY_LABEL_RE = _PAT.get("D-08-identity_label",
@@ -792,28 +797,27 @@ def run_checks(path, fmt, lines):
             f"grep -oP '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{{2,}}' {path.name} | sort | uniq"
         ))
 
-    # D-02 Noms complets en clair (heuristique)
-    name_hits = []
-    for ln, text in lines:
-        # Exclure les lignes dont le contexte est clairement technique
-        if FULLNAME_EXCLUSION_RE and FULLNAME_EXCLUSION_RE.search(text):
-            continue
-        for m in FULLNAME_RE.finditer(text):
-            val = m.group(0)
-            if (len(val.split()) >= 2
-                    and not re.search(r'\.(java|log|xml|yml|json)$', val, re.IGNORECASE)):
-                name_hits.append((ln, f"Nom détecté : {val}  |  {text[:100]}"))
-                break
+    # D-02 Noms de personnes — détection par label contextuel
+    name_hits = grep(FULLNAME_RE)
     if name_hits:
+        names_found = set()
+        for _, t in name_hits:
+            m = FULLNAME_RE.search(t)
+            if m:
+                # group(2) contient la valeur capturée après le label
+                val = m.group(2).strip() if m.lastindex and m.lastindex >= 2 else m.group(0)
+                names_found.add(val)
         findings.append(Finding(
             "D-02", "D",
-            f"Noms de personnes potentiellement exposes : {len(name_hits)} occurrence(s)",
+            f"Noms de personnes détectés : {len(name_hits)} occurrence(s)",
             "ELEVE",
-            "Des chaines correspondant a des noms propres complets apparaissent dans les logs. "
-            "Vérifier s'il s'agit de données client reelles. "
-            "Si oui : pseudonymiser ou remplacer par un identifiant technique.",
+            f"Des noms de personnes apparaissent en clair dans les logs "
+            f"(champs : nom=, prenom=, fullname=, client_name=...).\n"
+            f"Exemples : {', '.join(sorted(names_found)[:5])}\n\n"
+            "Données personnelles identifiantes (loi 2008-12 / RGPD). "
+            "Pseudonymiser ou exclure du logging.",
             fmt_excerpt(name_hits),
-            f"grep -oP '[A-Z]{{2,}}(\\s+[A-Z]{{2,}}){{1,3}}' {path.name}"
+            f"grep -iP '(nom|prenom|fullname|firstname|lastname|client_name)\\s*[=:]' {path.name}"
         ))
 
     # D-03 PII dans les champs JSON
