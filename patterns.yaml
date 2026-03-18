@@ -367,24 +367,18 @@ pii_patterns:
     flags: IGNORECASE
     description: Données financières Mobile Money en clair
     level: ELEVE
+
+  - id: D-02-fullname
     group: Noms de personnes
     category: D
-    pattern: '\b([A-Z]{2,}(?:\s+[A-Z]{2,}){1,3})\b'
-    flags: ''
-    description: Noms complets en majuscules — heuristique
+    pattern: "(?i)\\b(nom|prenom|pr\xE9nom|firstname|lastname|fullname|full_name|nom_complet|client_name|customer_name|beneficiaire|destinataire|expediteur)\\s*[=:\"]\\s*([A-Za-z\xC0-\xFF\\-]{2,}(?:\\s+[A-Za-z\xC0-\xFF\\-]{2,}){1,3})"
+    description: >
+      Nom de personne détecté par label contextuel (nom=, prenom=, fullname=, client_name=...).
+      Séparateurs acceptés : = : " — pas un espace seul pour éviter les phrases en langage naturel.
     level: ELEVE
     note: >
-      Exclusions appliquées dans le code (termes techniques, SQL, produits Allot).
-      Voir fullname_exclusion_terms ci-dessous pour la liste complète.
-
-  - id: D-02-sql_keywords
-    group: Mots-clés SQL dans logs
-    category: D
-    pattern: '\b(UNION\s+ALL|ORDER\s+BY|GROUP\s+BY|HAVING|INNER\s+JOIN|LEFT\s+JOIN|RIGHT\s+JOIN|FULL\s+JOIN|CROSS\s+JOIN|DISTINCT|LIMIT\s+\d|OFFSET\s+\d)\b'
-    flags: IGNORECASE
-    description: Mots-clés SQL détectés dans les logs — indique des requêtes complètes loggées
-    level: MODERE
-    note: Remonte dans une catégorie dédiée plutôt que comme faux positif D-02
+      Approche label-first avec séparateur strict.
+      Détecte nom="Jean Dupont" ou fullname=Marie Ndiaye mais pas "prénom, nom du propriétaire".
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -527,67 +521,6 @@ pan_exclusion_terms:
   - gauge
   - sample
   - timestamp
-
-
-# ═══════════════════════════════════════════════════════════════
-# Filtre contextuel D-02 (noms de personnes)
-# Lignes contenant ces termes sont exclues du check D-02
-# (évite les faux positifs sur acronymes techniques et mots-clés SQL)
-# ═══════════════════════════════════════════════════════════════
-
-fullname_exclusion_terms:
-  # Produits et composants Allot / DSC
-  - DSC CLI
-  - CLOUD OSN
-  - GROUP ID
-  - FLOOD MNG
-  - HBAD
-  - PREDICTOR
-  - CAPTURE
-  - DETECT
-  - WEBUI
-  - CLUSTER
-  # Mots-clés SQL
-  - UNION ALL
-  - ORDER BY
-  - GROUP BY
-  - INNER JOIN
-  - LEFT JOIN
-  - RIGHT JOIN
-  - SELECT
-  - INSERT
-  - UPDATE
-  - DELETE
-  - WHERE
-  - HAVING
-  - LIMIT
-  # Termes Java / Spring
-  - SPRING
-  - HIBERNATE
-  - TOMCAT
-  - THREAD
-  - SHUTDOWN
-  # Termes techniques génériques
-  - ERROR
-  - WARN
-  - INFO
-  - DEBUG
-  - TRACE
-  - HTTP
-  - API
-  - SQL
-  - JWT
-  - SSL
-  - TLS
-  - PKI
-  - SCEP
-  - HSS
-  - RSA
-  - GET
-  - PUT
-  - POST
-  - DELETE
-  - PATCH
 
 
 # ═══════════════════════════════════════════════════════════════
