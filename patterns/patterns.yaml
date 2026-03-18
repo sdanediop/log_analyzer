@@ -1,0 +1,557 @@
+# patterns.yaml
+# Patterns de détection pour l'audit de logs
+#
+# Structure de chaque entrée :
+#   id          : identifiant unique du pattern
+#   group       : groupe de rattachement (affiché dans le rapport)
+#   category    : catégorie du check (S=Sécurité, D=Données, A=Auth, P=Privilèges, F=Forensique)
+#   pattern     : expression régulière (syntaxe Python re)
+#   flags       : modificateurs regex optionnels — IGNORECASE, MULTILINE (défaut: IGNORECASE)
+#   description : ce que le pattern détecte (pour documentation)
+#   level       : niveau de criticité si détecté (CRITIQUE, ELEVE, MODERE, FAIBLE)
+#   note        : précision ou mise en garde sur le pattern (optionnel)
+#
+# Modifier un pattern : éditer la valeur `pattern` directement
+# Désactiver un pattern : ajouter `enabled: false`
+# Ajouter un pattern : copier un bloc existant, changer id et pattern
+
+
+# ═══════════════════════════════════════════════════════════════
+# [S] SECURITE — Secrets et credentials
+# ═══════════════════════════════════════════════════════════════
+
+security_patterns:
+
+  - id: S-01-password
+    group: Secrets / Credentials
+    category: S
+    pattern: '(?i)\bpasswd?\s*[=:]\s*\S{3,}'
+    description: Mot de passe en clair (password=, passwd=)
+    level: CRITIQUE
+
+  - id: S-01-secret
+    group: Secrets / Credentials
+    category: S
+    pattern: '(?i)\bsecret\s*[=:]\s*\S{3,}'
+    description: Secret applicatif en clair (secret=)
+    level: CRITIQUE
+
+  - id: S-01-api_key
+    group: Secrets / Credentials
+    category: S
+    pattern: '(?i)\bapi[_\-]?key\s*[=:]\s*\S{6,}'
+    description: Clé API en clair (api_key=, apikey=)
+    level: CRITIQUE
+
+  - id: S-01-token_kv
+    group: Secrets / Credentials
+    category: S
+    pattern: '(?i)\btoken\s*[=:]\s*[A-Za-z0-9._\-]{20,}'
+    description: Token en clair (token= suivi d'une valeur longue)
+    level: CRITIQUE
+
+  - id: S-01-bearer
+    group: Secrets / Credentials
+    category: S
+    pattern: 'Bearer\s+[A-Za-z0-9._\-]{20,}'
+    flags: ''
+    description: Token Bearer HTTP en clair
+    level: CRITIQUE
+
+  - id: S-01-credential
+    group: Secrets / Credentials
+    category: S
+    pattern: '(?i)\bcredential[s]?\s*[=:]\s*\S{3,}'
+    description: Credential générique en clair
+    level: CRITIQUE
+
+  - id: S-01-private_key
+    group: Clés cryptographiques
+    category: S
+    pattern: '(?i)(private[_\-]?key|-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+)?PRIVATE)'
+    description: Clé privée (label ou début de bloc PEM)
+    level: CRITIQUE
+
+  - id: S-01-ssh_key
+    group: Clés cryptographiques
+    category: S
+    pattern: '-----BEGIN\s+(RSA|DSA|EC|OPENSSH)\s+PRIVATE\s+KEY-----'
+    flags: ''
+    description: Bloc de clé privée SSH
+    level: CRITIQUE
+
+  - id: S-01-pgp_key
+    group: Clés cryptographiques
+    category: S
+    pattern: '-----BEGIN\s+PGP\s+(PRIVATE|SECRET)\s+KEY\s+BLOCK-----'
+    flags: ''
+    description: Bloc de clé privée PGP
+    level: CRITIQUE
+
+  - id: S-01-x509_cert
+    group: Clés cryptographiques
+    category: S
+    pattern: '-----BEGIN\s+CERTIFICATE-----'
+    flags: ''
+    description: Certificat X.509 en clair dans les logs
+    level: ELEVE
+    note: Un certificat public n'est pas secret en soi, mais sa présence dans les logs peut révéler des détails sur l'infrastructure PKI
+
+  - id: S-01-jwt
+    group: Secrets / Credentials
+    category: S
+    pattern: 'eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}'
+    flags: ''
+    description: JSON Web Token (JWT) en clair — triplet base64url
+    level: CRITIQUE
+
+  - id: S-01-hash_passwd
+    group: Secrets / Credentials
+    category: S
+    pattern: '(?i)\$(2[aby]|5|6)\$[./A-Za-z0-9]{10,}'
+    description: Hash de mot de passe bcrypt / SHA-256 / SHA-512
+    level: CRITIQUE
+
+  - id: S-01-hash_md5_ctx
+    group: Secrets / Credentials
+    category: S
+    pattern: '(?i)(password|passwd|hash|md5)[=:\s"\x27]([0-9a-f]{32})\b'
+    description: Hash MD5 de mot de passe en contexte
+    level: CRITIQUE
+
+  - id: S-01-jdbc_url
+    group: Connexions base de données
+    category: S
+    pattern: 'jdbc:[a-z]+://[\w.\-]+:\d+/\w+'
+    flags: IGNORECASE
+    description: URL JDBC exposant host, port et nom de base
+    level: ELEVE
+
+  - id: S-01-jdbc_creds
+    group: Connexions base de données
+    category: S
+    pattern: 'jdbc:[a-z]+://[^\s"'']+\s+as\s+"[^"]+"'
+    flags: IGNORECASE
+    description: URL JDBC avec identifiant de connexion
+    level: CRITIQUE
+
+  - id: S-01-hex_key
+    group: Clés cryptographiques
+    category: S
+    pattern: '\b[0-9a-f]{64,}\b'
+    flags: IGNORECASE
+    description: Chaîne hexadécimale longue (≥64 chars) — clé cryptographique potentielle
+    level: ELEVE
+    note: Peut générer des faux positifs sur des logs de systèmes PKI/anti-DDoS (coefficients statistiques). Filtrage contextuel appliqué dans le code.
+
+  - id: S-01-dsn
+    group: Connexions base de données
+    category: S
+    pattern: '(?i)(mongodb|redis|amqp|mysql|postgres|ldap)://[^\s"'']{10,}'
+    description: DSN (Data Source Name) avec credentials potentiels
+    level: CRITIQUE
+
+
+# ═══════════════════════════════════════════════════════════════
+# [S] SECURITE — Infrastructure et code
+# ═══════════════════════════════════════════════════════════════
+
+  - id: S-02-internal_ip
+    group: IPs internes
+    category: S
+    pattern: '\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b'
+    flags: ''
+    description: Adresses IP privées RFC 1918 exposées dans les logs
+    level: MODERE
+
+  - id: S-03-stack_trace
+    group: Stack traces
+    category: S
+    pattern: '(Traceback \(most recent|Exception in thread|java\.\w+\.\w+Exception|org\.\w+\.\w+Exception|NullPointerException|StackOverflowError|File ".*", line \d+|StackTrace:)'
+    flags: IGNORECASE
+    description: Stack trace révélant la structure interne de l'application
+    level: ELEVE
+
+  - id: S-04-sql_query
+    group: Requêtes SQL
+    category: S
+    pattern: '\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE)\b.{0,80}\b(FROM|INTO|TABLE|WHERE)\b'
+    flags: IGNORECASE
+    description: Requête SQL complète exposant le schéma de base de données
+    level: MODERE
+
+  - id: S-05-debug_level
+    group: Verbosité
+    category: S
+    pattern: '\b(DEBUG|TRACE)\b'
+    flags: ''
+    description: Niveau de log DEBUG ou TRACE actif en production
+    level: MODERE
+    note: Signalé uniquement si > 5% des entrées — seuil configurable dans le code
+
+
+# ═══════════════════════════════════════════════════════════════
+# [A] AUTHENTIFICATION
+# ═══════════════════════════════════════════════════════════════
+
+auth_patterns:
+
+  - id: A-login
+    group: Événements d'authentification
+    category: A
+    pattern: '\b(login|logged.?in|sign.?in|auth(?:entication|entifié|entification)?[._\s](?:success|réussie?|ok)|authentification|authentifié|connexion.?réussie?|session[._\s](?:start|open|ouverte?|démarr)|ouverture.?(?:de.?)?session)\b'
+    flags: IGNORECASE
+    description: Événement de connexion / ouverture de session (FR + EN)
+    level: INFO
+
+  - id: A-logout
+    group: Événements d'authentification
+    category: A
+    pattern: '\b(logout|logged.?out|sign.?out|session[._\s](?:end|close|expir|fermée?|terminée?)|déconnexion|fermeture.?(?:de.?)?session|session.?expirée?)\b'
+    flags: IGNORECASE
+    description: Événement de déconnexion / fermeture de session (FR + EN)
+    level: INFO
+
+  - id: A-auth_failure
+    group: Événements d'authentification
+    category: A
+    pattern: '(auth(?:entication|entifié)?.{0,20}(?:fail|error|invalid|refused)|login.{0,20}fail|invalid.{0,20}password|wrong.{0,20}password|\b(401|403)\b|access.denied|permission.denied|challengePassword|Invalid\s+Authentication|authentication\s+failed)'
+    flags: IGNORECASE
+    description: Échec d'authentification ou accès refusé
+    level: MODERE
+    note: >
+      Exclut les patterns réseau type "matched" (QuarantinePolicyMng) et
+      "End Report Batch" qui déclenchaient A-03 par faux positif.
+      Le pattern exige désormais un contexte auth explicite autour des mots-clés.
+
+  - id: A-user
+    group: Identité utilisateur
+    category: A
+    pattern: '(?:(?:user(?![\w._-]*agent)[\w._-]*)|utilisateur|login_name|nom.?utilisateur)[=:"'':\s]+([A-Za-z0-9._@\-]{3,60})'
+    flags: IGNORECASE
+    description: Identifiant utilisateur dans les logs (username, userId, utilisateur...)
+    note: Exclut user_agent. Couvre username_ad, user_login et autres variantes.
+    level: INFO
+
+
+# ═══════════════════════════════════════════════════════════════
+# [P] PRIVILEGES ET ACTIONS
+# ═══════════════════════════════════════════════════════════════
+
+privilege_patterns:
+
+  - id: P-01-privileged_cmd
+    group: Commandes privilégiées
+    category: P
+    pattern: '\b(configure|commit|reset\s+password|resetPassword|debug\s+\w+|dump\s+\w+|show\s+running|running[_\-]?config|adduser|createuser|useradd|passwd\b|sudo\s|chmod|chown|iptables|access[._\-]security|removeKeystore|addKeystore)\b'
+    flags: IGNORECASE
+    description: Commande sensible ou administrative exécutée
+    level: ELEVE
+    note: shutdown et reboot exclus — couverts par C-22 (activité système). Ne pas confondre avec GracefulShutdown Spring Boot.
+
+  - id: P-02-write_action
+    group: Actions HTTP / CRUD
+    category: P
+    pattern: '\b(PUT|POST|DELETE|PATCH|CREATE|UPDATE|MODIFY|INSERT|REMOVE|WRITE)\b|http\.request\.method\s*[=:]\s*["'']?(PUT|POST|DELETE|PATCH)["'']?|(?:method|méthode)\s*[=:]\s*["'']?(PUT|POST|DELETE|PATCH)["'']?'
+    flags: IGNORECASE
+    description: Action d'écriture HTTP ou CRUD
+    level: INFO
+
+  - id: P-02-action_trace
+    group: Traçabilité des actions
+    category: P
+    pattern: '(url\.path|event\.action|http\.request\.(?:url|path)|endpoint|chemin|action.métier|action.applicative)\s*[=:=]'
+    flags: IGNORECASE
+    description: URL appelée ou action métier explicitement nommée — signal principal de traçabilité
+    level: INFO
+
+  - id: P-03-night_activity
+    group: Accès hors horaires
+    category: P
+    pattern: '[T\s](0[0-5]|2[2-3]):\d{2}:\d{2}'
+    flags: ''
+    description: Activité entre 22h et 5h — à corréler avec login ou commande sensible
+    level: MODERE
+
+
+# ═══════════════════════════════════════════════════════════════
+# [D] DONNEES PERSONNELLES
+# ═══════════════════════════════════════════════════════════════
+
+pii_patterns:
+
+  - id: D-01-msisdn
+    group: Numéros de téléphone
+    category: D
+    pattern: '\b(221\s?[37]\d{7,8}|00221[37]\d{7,8})\b'
+    flags: ''
+    description: Numéro MSISDN sénégalais (221 7x / 221 3x)
+    level: CRITIQUE
+
+  - id: D-01b-email
+    group: Adresses email
+    category: D
+    pattern: '\b[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,10}\b'
+    flags: ''
+    description: Adresse email en clair
+    level: ELEVE
+    note: Les domaines example.com, test, localhost, noreply sont filtrés dans le code
+
+  - id: D-05-pan
+    group: Données bancaires
+    category: D
+    pattern: '\b(?:\d[ \-]?){13,19}\d\b'
+    flags: ''
+    description: Numéro de carte bancaire (PAN) — vérification Luhn appliquée dans le code
+    level: CRITIQUE
+    note: Filtre contextuel appliqué pour exclure les faux positifs statistiques (OLS, regression, packet...)
+
+  - id: D-07-otp_pin
+    group: Codes d'authentification
+    category: D
+    pattern: '(?i)\b(otp|one.?time.?password|pin|code.?secret|code.?verification|verification.?code|auth.?code|totp|hotp)\s*[=:"''\s]\s*(\d{4,8})\b'
+    description: Code OTP ou PIN en clair dans les logs
+    level: CRITIQUE
+
+  - id: D-08-identity_label
+    group: Données d'identité
+    category: D
+    pattern: '(?i)\b(cni|carte.?nationale|national.?id|id.?card|passport|passeport|id.?number|numero.?identite|identity.?number|nif|nin|ssn|cin)\s*[=:"'':\s]\s*([A-Z0-9\-]{5,20})'
+    description: Identifiant national (CNI, passeport) détecté par label contextuel
+    level: CRITIQUE
+
+  - id: D-08-dob_label
+    group: Données d'identité
+    category: D
+    pattern: '(?i)\b(date.?(?:of.?)?birth|date.?naissance|dob|birth.?date|birthdate|naissance|date.?naiss)\s*[=:"'':\s]\s*(\d{2}[\-/\.]\d{2}[\-/\.]\d{2,4}|\d{4}[\-/\.]\d{2}[\-/\.]\d{2})'
+    description: Date de naissance détectée par label contextuel
+    level: CRITIQUE
+    note: Détection par label uniquement — les dates sans contexte génèrent trop de faux positifs
+
+  - id: D-10-imei
+    group: Identifiants télécom
+    category: D
+    pattern: '\b\d{15}\b'
+    flags: ''
+    description: IMEI (identifiant terminal mobile — 15 chiffres)
+    level: ELEVE
+    note: Peut matcher des timestamps epoch ou des identifiants techniques. Filtre appliqué dans le code.
+
+  - id: D-10-iccid
+    group: Identifiants télécom
+    category: D
+    pattern: '\b89\d{17,18}\b'
+    flags: ''
+    description: ICCID (numéro de carte SIM — commence par 89)
+    level: ELEVE
+
+  - id: D-10-imsi
+    group: Identifiants télécom
+    category: D
+    pattern: '\b608\d{12}\b'
+    flags: ''
+    description: IMSI sénégalais (identifiant SIM réseau — commence par 608)
+    level: ELEVE
+
+  - id: D-10-contract
+    group: Identifiants télécom
+    category: D
+    pattern: '(?i)\b(contract(?:_?id)?|abonnement|subscription(?:_?id)?|num[ée]ro.?(?:de.?)?(?:contrat|compte|abonnement)|account.?(?:id|number)|msisdn|iccid|imsi|imei)\s*[=:"'':\s]\s*([A-Z0-9\-]{5,25})'
+    description: Numéro de contrat ou d'abonnement (détection par label)
+    level: ELEVE
+
+  - id: D-04-mobile_money
+    group: Données financières Mobile Money
+    category: D
+    pattern: '(balance|solde|montant|amount|transaction|paiement|payment|FCFA|XOF|Orange\s*Money|OM\s+balance)'
+    flags: IGNORECASE
+    description: Données financières Mobile Money en clair
+    level: ELEVE
+
+  - id: D-02-fullname
+    group: Noms de personnes
+    category: D
+    pattern: "(?i)\\b(nom|prenom|pr\xE9nom|firstname|lastname|fullname|full_name|nom_complet|client_name|customer_name|beneficiaire|destinataire|expediteur)\\s*[=:\"]\\s*([A-Za-z\xC0-\xFF\\-]{2,}(?:\\s+[A-Za-z\xC0-\xFF\\-]{2,}){1,3})"
+    description: >
+      Nom de personne détecté par label contextuel (nom=, prenom=, fullname=, client_name=...).
+      Séparateurs acceptés : = : " — pas un espace seul pour éviter les phrases en langage naturel.
+    level: ELEVE
+    note: >
+      Approche label-first avec séparateur strict.
+      Détecte nom="Jean Dupont" ou fullname=Marie Ndiaye mais pas "prénom, nom du propriétaire".
+
+
+# ═══════════════════════════════════════════════════════════════
+# [F] FORENSIQUE
+# ═══════════════════════════════════════════════════════════════
+
+forensic_patterns:
+
+  - id: F-01-timestamp_iso
+    group: Horodatages
+    category: F
+    pattern: '\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'
+    flags: ''
+    description: Timestamp ISO 8601
+
+  - id: F-01-timestamp_clf
+    group: Horodatages
+    category: F
+    pattern: '\d{2}/[A-Za-z]{3}/\d{4}[: ]\d{2}:\d{2}:\d{2}'
+    flags: ''
+    description: Timestamp format Common Log Format (Apache/Nginx)
+
+  - id: F-01-timestamp_syslog
+    group: Horodatages
+    category: F
+    pattern: '[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}'
+    flags: ''
+    description: Timestamp format syslog
+
+  - id: F-01-timestamp_custom
+    group: Horodatages
+    category: F
+    pattern: '\d{2}/\d{2}/\d{4}[; ]\d{2}:\d{2}:\d{2}'
+    flags: ''
+    description: Timestamp format DD/MM/YYYY
+
+
+# ═══════════════════════════════════════════════════════════════
+# Clés JSON considérées comme PII
+# (utilisées pour le check D-03 sur les fichiers JSON)
+# ═══════════════════════════════════════════════════════════════
+
+pii_json_keys:
+  # Identité utilisateur
+  - userid
+  - user_id
+  - username
+  - username_ad
+  - user_ad
+  - user_login
+  - user.name
+  - utilisateur
+  - login_name
+  - nom_utilisateur
+  # Contacts
+  - msisdn
+  - phone
+  - phonenumber
+  - telephone
+  - email
+  - mail
+  - emailaddress
+  - e-mail
+  # Noms
+  - fullname
+  - firstname
+  - lastname
+  - name
+  - nom
+  - prenom
+  # Session / contexte
+  - sessionid
+  - session_id
+  - externalid
+  - projectid
+  # Réseau / origine
+  - client.ip
+  - clientip
+  - client_ip
+  - source.name
+  - sourcename
+  - remote_addr
+  - remoteaddr
+  - x-forwarded-for
+
+
+# ═══════════════════════════════════════════════════════════════
+# Clés JSON considérées comme sensibles (secrets)
+# (utilisées pour détecter des secrets dans les structures JSON)
+# ═══════════════════════════════════════════════════════════════
+
+sensitive_json_keys:
+  - password
+  - passwd
+  - secret
+  - token
+  - access_token
+  - refresh_token
+  - api_key
+  - apikey
+  - credential
+  - private_key
+  - authorization
+  - client_secret
+  - jwt
+  - bearer
+  - pin
+  - cvv
+
+
+# ═══════════════════════════════════════════════════════════════
+# Filtre contextuel PAN
+# Lignes contenant ces termes sont exclues du check D-05
+# (évite les faux positifs sur des valeurs numériques techniques)
+# ═══════════════════════════════════════════════════════════════
+
+pan_exclusion_terms:
+  - OLS
+  - regression
+  - predictor
+  - model
+  - coefficient
+  - parameter
+  - pattern
+  - capture
+  - flood
+  - statistic
+  - matrix
+  - vector
+  - hash
+  - checksum
+  - crc
+  - sequence
+  - offset
+  - bytes
+  - packet
+  - frame
+  - counter
+  - metric
+  - gauge
+  - sample
+  - timestamp
+
+
+# ═══════════════════════════════════════════════════════════════
+# Filtre contextuel D-10 (identifiants télécom)
+# Lignes contenant ces termes sont exclues des checks IMEI/IMSI/ICCID
+# (même logique que pan_exclusion_terms — faux positifs statistiques)
+# ═══════════════════════════════════════════════════════════════
+
+telecom_exclusion_terms:
+  - OLS
+  - regression
+  - predictor
+  - coefficient
+  - model
+  - statistic
+  - matrix
+  - vector
+  - flood
+  - capture
+  - packet
+  - frame
+  - bytes
+  - offset
+  - counter
+  - metric
+  - gauge
+  - sample
+  - pattern
+  - sequence
+  - timestamp
+  - RequestCapture
+  - FloodAnalyzer
+  - GreedyPatterns
+  - DetectMng
